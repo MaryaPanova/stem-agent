@@ -8,3 +8,4 @@ playbooks/
 *.egg-info/
 dist/
 .venv/
+.claude/settings.local.json
