@@ -1,15 +1,27 @@
-"""Stem Agent — self-specializing AI agent."""
+"""Stem Agent — a self-specializing agent that starts undifferentiated.
 
-from .models import AgentState, Phase, Checkpoint, Playbook, SpecialistProfile
-from .stem_agent import StemAgent
-from .task_archaeologist import TaskArchaeologist
+The same code, pointed at different environments, becomes fundamentally different agents.
+Public surface:
+
+    from stem import StemAgent, Evolver, Harness, Specialization
+    from stem.envs import get_environment
+"""
+
+from .agent import StemAgent
+from .evolution import Evolver, apply_mutation
+from .llm import LLMClient, ScriptedLLM
+from .models import Mutation, MutationType, Specialization, Task
+from .eval import Harness
 
 __all__ = [
     "StemAgent",
-    "TaskArchaeologist",
-    "AgentState",
-    "Phase",
-    "Checkpoint",
-    "Playbook",
-    "SpecialistProfile",
+    "Evolver",
+    "apply_mutation",
+    "LLMClient",
+    "ScriptedLLM",
+    "Mutation",
+    "MutationType",
+    "Specialization",
+    "Task",
+    "Harness",
 ]

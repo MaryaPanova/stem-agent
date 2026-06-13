@@ -1,0 +1,14 @@
+services:
+  stem:
+    build: .
+    image: stem-agent
+    environment:
+      # Passed through from your shell / .env. Leave unset to run the mock demo.
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - STEM_PROVIDER=${STEM_PROVIDER:-anthropic}
+      - STEM_MODEL=${STEM_MODEL:-claude-sonnet-4-6}
+    volumes:
+      - ./results:/app/results
+    # Override at runtime, e.g.:
+    #   docker compose run --rm stem python main.py eval --domain trading -g 3
+    command: ["python", "main.py", "eval", "--mock"]

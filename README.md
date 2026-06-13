@@ -1,625 +1,269 @@
 # Stem Agent
 
-A self-specializing AI agent that starts undifferentiated, interviews you about a problem class, reverse-engineers how that class of task is approached (task archaeology), then crystallizes into a domain specialist — emitting a reusable system prompt, structured playbook, and standalone runnable agent.
+A self-specializing AI agent that starts knowing nothing and grows into whatever a class
+of tasks requires.
+
+You don't tell it what to be. You point it at a *world* — some tasks, some tools, a way of
+scoring attempts — and the same code discovers what it needs to become by trying things and
+watching what works.
 
 ---
 
-## Table of contents
+## The idea
 
-1. [How it works](#how-it-works)
-2. [Architecture](#architecture)
-3. [Prerequisites](#prerequisites)
-4. [Installation](#installation)
-5. [Configuration](#configuration)
-6. [Running the agent](#running-the-agent)
-7. [What to expect — phase by phase](#what-to-expect--phase-by-phase)
-8. [Pausing and resuming](#pausing-and-resuming)
-9. [The emitted artifacts](#the-emitted-artifacts)
-10. [Running the crystallized specialist](#running-the-crystallized-specialist)
-11. [Project layout](#project-layout)
-12. [Running tests](#running-tests)
-13. [Switching LLM providers](#switching-llm-providers)
-14. [Troubleshooting](#troubleshooting)
+A "stem agent" is undifferentiated on purpose. At generation zero its system prompt says,
+in effect, *"you've been dropped somewhere unfamiliar with some tools and an objective; you
+don't yet know what kind of agent you should be."* It is given an environment, not an
+identity. It pokes at the tools, attempts the tasks, fails, and an evolution step rewrites
+the agent based on what actually happened. Run that loop and the **same Python** turns into
+a trader in one environment and a security auditor in another.
+
+This is the second version. The first version (preserved in git history) was a learning
+loop, but it cheated: its very first question was *"what domain do you want?"* — so the
+starting point was already specialized, and the only thing that ever changed was the
+wording of a prompt. That's the critique from JetBrains, and it was right. A learning loop
+that refines a prompt around a domain you handed it is not a stem agent. A stem agent has to
+*find* the domain in the environment, and it has to be able to change more than its prose.
+
+So the rebuild changes two things:
+
+1. **Truly undifferentiated start.** There is no domain input anywhere. The domain is
+   implicit in the tools and the task objective, and is never named to the agent. A task
+   says *"grow `portfolio_value` before the final step"* — it never says *"you are a
+   trader."* That word only ever shows up later, in the genome, if evolution puts it there.
+
+2. **A real evolution surface.** Evolution can change identity, **and** which tools the
+   agent uses, **and** the reusable skills it carries, **and** its loop structure (whether
+   it plans / verifies / reflects), **and** the sub-agents it can spawn, **and** its own
+   success criteria. Not just the prompt.
 
 ---
 
-## How it works
+## What evolves
 
-```
-INTERVIEW → ARCHAEOLOGY → CRYSTALLIZATION → EXECUTION ↔ EVOLUTION
-```
+The mutable self is a single object — the `Specialization` genome. Every field is a
+distinct surface the evolution engine can rewrite, each with its own mutation type:
 
-| Phase | What happens | When it ends |
+| Surface | What it controls | Mutation |
 |---|---|---|
-| **INTERVIEW** | The agent asks you focused questions one at a time: domain, artifacts, failure examples, constraints | Convergence score ≥ 0.75 (or 10 turns max) |
-| **ARCHAEOLOGY** | 3-pass LLM analysis: artifact patterns → decision points → failure triangulation | Always completes; advances or loops back to INTERVIEW if signal is too weak |
-| **CRYSTALLIZATION** | Emits a layered system prompt, a playbook JSON, and a standalone Python agent file | Always completes; advances to EXECUTION |
-| **EXECUTION** | Runs as the crystallized specialist; every response is silently scored | Rolling score drops below 0.6 over 5 turns → triggers EVOLUTION |
-| **EVOLUTION** | Updates the specialist profile and playbook from failure feedback; re-emits artifacts | Always completes; returns to EXECUTION |
+| `identity` | the system-prompt persona / instructions | `rewrite_identity` |
+| `adopted_tools` | which discovered tools it actually uses, + learned usage notes | `adopt_tool` |
+| `skills` | named, reusable procedures it accumulates instead of re-deriving | `add_skill` |
+| `loop` | which phases run: plan / act / verify / reflect | `set_loop` |
+| `subagents` | specs for focused sub-agents it can delegate to | `define_subagent` |
+| `eval_criteria` | the rubric it judges its own work against | `update_eval_criteria` |
 
-The session state is checkpointed to disk after every phase transition and every 5 execution turns, so it can always be resumed.
+A blank genome has none of these (`Specialization().is_blank() == True`). Turning on
+`loop.verify` literally inserts a self-check turn before a final answer is accepted;
+defining a sub-agent literally adds a `spawn_subagent` tool to the agent's toolset. These
+are behavioral changes, not decoration.
+
+---
+
+## How to run
+
+Docker-first, because a self-modifying agent with web access and code execution should be
+contained.
+
+```bash
+# 1. Prove the whole pipeline with no API key (toy domain, tokenless):
+make docker-eval-mock          # or: make eval-mock
+
+# 2. Real evaluation across all domains (spends tokens):
+cp .env.example .env           # add your ANTHROPIC_API_KEY
+make docker-eval               # or, on the host: make eval
+```
+
+Without Docker:
+
+```bash
+make install                   # venv + deps
+make test                      # 34 tests, no API key needed
+make eval-mock                 # tokenless end-to-end demo
+
+# real runs:
+python main.py eval --domain trading -g 3      # baseline vs evolved
+python main.py evolve --domain trading -o results/genome.json
+python main.py run --domain trading            # inspect one rollout (verbose)
+python main.py run --domain trading --genome results/genome.json   # with the evolved genome
+```
+
+Tool use is implemented for Anthropic; that is the supported provider.
+
+---
+
+## Evaluation
+
+The harness is built to test the **evolution**, not just the output:
+
+1. **baseline** — a blank genome on the held-out *test* tasks. Expected near zero.
+2. **evolve** — run K generations over the *train* tasks, mutating the genome.
+3. **evolved** — the resulting genome on the *same* held-out tasks.
+
+If evolution did nothing real, baseline and evolved are equal. The gap is the signal. It
+also reports process metrics: tool calls, errors, error recoveries, reflection depth,
+sub-agent runs, and which genome surfaces evolution touched.
+
+### What's actually proven here
+
+**The pipeline (deterministic, no tokens).** `make eval-mock` runs the full
+rollout → evolve → re-evaluate loop on a toy environment with a scripted brain. Baseline
+scores **0.00**, evolved scores **1.00**, and evolution touches four different surfaces
+(`rewrite_identity`, `adopt_tool`, `add_skill`, `update_eval_criteria`) — not just the
+prompt. This is asserted in `tests/test_harness.py`.
+
+**The trading domain's economics (deterministic).** The simulated exchange is a seeded,
+noisy sinusoid that completes whole cycles, so the score has a genuine ~0 floor and real
+headroom:
+
+| strategy | return | resulting score |
+|---|---|---|
+| do nothing | 0% | **0.00** |
+| buy-and-hold | ≈ −5% to −8% | **0.00** (floored) |
+| clairvoyant cycle trading | ≈ +44% to +46% | **~1.00** |
+
+A fresh agent that never figures out the buy-low-sell-high pattern genuinely makes no
+money; an agent that discovers it is rewarded in proportion to a clairvoyant optimum. Tests
+in `tests/test_exchange.py` pin all three rows.
+
+**Cross-domain, with a real model — you run this.** I did not burn tokens auto-running the
+live eval (and Docker isn't available in the build sandbox). Run it yourself:
+
+```bash
+make eval          # writes results/eval.json + prints a table like:
+```
+
+```
+| domain   | baseline | evolved |  Δ   | generations | surfaces evolved |
+|----------|----------|---------|------|-------------|------------------|
+| trading  |   ...    |   ...   | ...  |      3      |       ...        |
+| security |   ...    |   ...   | ...  |      3      |       ...        |
+| research |   ...    |   ...   | ...  |      3      |       ...        |
+```
+
+### Honest about the domains
+
+- **Trading** is the proven one: objective P&L scoring, a real ~0 baseline, multi-step
+  agentic tasks (you have to discover the API, advance time, and trade).
+- **Security** is functional but scaffolded: virtual files with planted vulnerabilities,
+  an objective precision/recall (F1) score, tools to read and grep. Less tuned than trading.
+- **Research** is the fuzziest: it uses real web search/fetch tools, but scores by keyword
+  coverage of ground-truth facts — a crude proxy, and a strong base model can sometimes
+  answer from memory, so its baseline is the least clean of the three. It's here to prove
+  the *same agent code* runs on a web-using, non-objective domain, not as a polished
+  benchmark.
 
 ---
 
 ## Architecture
 
-### Component diagram
+The agent, the evolution engine, and the eval harness are all completely domain-agnostic.
+Adding a domain is one line in `stem/envs/registry.py`.
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                          StemAgent                              │
-│                      (stem_agent.py)                            │
-│                                                                 │
-│   ┌──────────┐   ┌────────────┐   ┌─────────────┐               │
-│   │INTERVIEW │──▶│ARCHAEOLOGY │──▶│CRYSTALLIZE  │               │
-│   └──────────┘   └────────────┘   └──────┬──────┘               │
-│        ▲                │                │                      │
-│        │          TaskArchaeologist       ▼                     │
-│        │          (3-pass LLM)    ┌─────────────┐               │
-│        │                          │  EXECUTION  │◀─┐            │
-│        │                          └──────┬──────┘  │            │
-│        │                                 │ drift    │           │
-│        │                          ┌──────▼──────┐  │            │
-│        │                          │  EVOLUTION  │──┘            │
-│        │                          └─────────────┘               │
-│        │                                                        │
-│   AgentState (Pydantic) ──▶ Checkpoint (JSON on disk)           │
-└──────────────────────────────┬──────────────────────────────────┘
-                               │
-                          LLMClient
-                        (stem/llm.py)
-                        /           \
-               Anthropic SDK      OpenAI SDK
+   ENVIRONMENT (the world)            UNDIFFERENTIATED AGENT              EVOLUTION ENGINE
+ ┌───────────────────────────┐     ┌───────────────────────────┐     ┌──────────────────┐
+ │ tasks  (objectives only)  │     │  rollout(genome):         │     │ reflect over     │
+ │ tools  (names + schemas)  │────▶│   plan? act verify? reflect│────▶│ trajectories +   │
+ │ score  (objective signal) │     │   (calls env tools)       │     │ scores           │
+ └───────────────────────────┘     └───────────────────────────┘     │      │           │
+        ▲                                    │ Trajectory             │ propose Mutations │
+        │                                    ▼                        │      │           │
+        │                         held-out eval: gen0 (~0)            │ apply to genome   │
+        └──────────────────────────  vs evolved  ◀───────────────────┴──────────────────┘
 ```
 
-### Key components
-
-| Component | File | Responsibility |
-|---|---|---|
-| `StemAgent` | `stem_agent.py` | Phase state machine, user I/O, checkpointing |
-| `TaskArchaeologist` | `task_archaeologist.py` | 3-pass LLM analysis of artifacts |
-| `Crystallizer` | `crystallizer.py` | Emits system prompt, playbook, agent code |
-| `ConvergenceDetector` | `convergence.py` | Per-turn scoring; rolling drift detection |
-| `LLMClient` | `llm.py` | Provider-agnostic adapter (OpenAI / Anthropic) |
-| `AgentState` | `models.py` | Single source of truth for all session state |
-
----
-
-### State machine
+### The rollout loop
 
 ```
-                    ┌─────────────────────────────┐
-           start    │                             │ convergence < 0.85
-             ▼      ▼                             │
-        INTERVIEW ──────▶ ARCHAEOLOGY ──────▶ CRYSTALLIZATION
-                   score ≥ 0.75                        │
-                   (or 10 turns)                       ▼
-                                               EXECUTION ◀──────┐
-                                                   │             │
-                                              drift detected     │
-                                             (rolling avg < 0.6) │
-                                                   ▼             │
-                                               EVOLUTION ────────┘
+genome ── render ──▶ system prompt + tool schemas
+                          │
+   task objective ───▶ [ plan? ] ─▶ act loop ──────────────┐
+                                     │  LLM turn            │
+                                     │   ├─ tool_use ─▶ env.execute() ─▶ observation ─┐
+                                     │   └─ final text ─▶ [ verify? ] ─▶ accept       │
+                                     └◀────────────────────────────────────────────────┘
+                          │
+                     [ reflect? ] ─▶ Trajectory (tool calls, errors, recoveries, notes)
 ```
 
-State is stored in `AgentState` and serialised to a checkpoint JSON after every transition. On resume, the agent loads the checkpoint and re-enters `_tick()` at the saved phase.
+`plan` / `verify` / `reflect` are off in a blank genome and switched on by `set_loop`
+mutations. A `spawn_subagent` tool appears only once the genome defines a sub-agent; the
+agent intercepts that call and runs a focused nested rollout with a restricted toolset.
 
----
-
-### Data flow through the pipeline
+### The genome (single source of the agent's self)
 
 ```
-User answers (text)
-       │
-       ▼
-  INTERVIEW loop
-  ┌────────────────────────────────────────────┐
-  │  _check_convergence()  ←── CONVERGENCE_SYSTEM prompt
-  │  score ≥ 0.75 → advance
-  └────────────────────────────────────────────┘
-       │
-       ▼
-  ARCHAEOLOGY
-  ┌────────────────────────────────────────────┐
-  │  _extract_artifacts_from_history()         │
-  │         ↓                                  │
-  │  TaskArchaeologist.run()                   │
-  │    Pass 1: artifact patterns               │
-  │    Pass 2: decision points                 │
-  │    Pass 3: failure triangulation           │
-  │         ↓                                  │
-  │  ArtifactAnalysis  →  _synthesize_profile()│
-  │         ↓                                  │
-  │  SpecialistProfile (convergence_score)     │
-  └────────────────────────────────────────────┘
-       │
-       ▼
-  CRYSTALLIZATION
-  ┌────────────────────────────────────────────┐
-  │  Crystallizer.crystallize()                │
-  │    _build_system_prompt()  ←── LLM call   │
-  │    _build_playbook()       ←── LLM call   │
-  │    _build_agent_code()     ←── template   │
-  │         ↓                                  │
-  │  Crystallizer.save()  (atomic write)       │
-  │    playbooks/{domain}_v1.json              │
-  │    playbooks/{domain}_agent.py             │
-  └────────────────────────────────────────────┘
-       │
-       ▼
-  EXECUTION loop
-  ┌────────────────────────────────────────────┐
-  │  LLMClient.stream_tokens()                 │
-  │    (using crystallized system_prompt)      │
-  │         ↓                                  │
-  │  ConvergenceDetector.score_turn()          │
-  │    rolling average of last 5 scores        │
-  │    avg < 0.6 → trigger EVOLUTION           │
-  └────────────────────────────────────────────┘
-       │
-       ▼
-  EVOLUTION
-  ┌────────────────────────────────────────────┐
-  │  _evolve_profile()    ←── LLM call         │
-  │  _evolve_playbook()   ←── LLM call         │
-  │  Crystallizer.rebuild_after_evolution()    │
-  │    re-emits system_prompt + agent_code     │
-  │  Crystallizer.save()  (atomic write, v2+)  │
-  └────────────────────────────────────────────┘
+Specialization
+├── identity          # generic at gen 0; a real persona once the domain is obvious
+├── adopted_tools     # [] at gen 0
+├── skills            # [] at gen 0
+├── loop              # plan/verify/reflect all off at gen 0
+├── subagents         # [] at gen 0
+├── eval_criteria     # [] at gen 0
+├── generation        # bumped each evolution step
+└── lineage           # human-readable change log per generation
+```
+
+Checkpointed atomically (write-temp-then-rename) to `results/` as both a full run and a
+genome sidecar, so evolved agents can be reloaded and re-run.
+
+### Layout
+
+```
+stem/
+├── models.py          # Specialization genome, Task, ToolSpec, Trajectory, Mutation, RunState
+├── llm.py             # Anthropic tool-use client + ScriptedLLM (tokenless test double)
+├── environment.py     # Environment ABC + ToolRegistry (tool dispatch + error capture)
+├── agent.py           # the rollout loop (plan/act/verify/reflect) + sub-agent spawning
+├── evolution.py       # reflect over trajectories -> Mutations -> apply (pure) to genome
+├── checkpoint.py      # atomic save/load of run state + genome
+├── tools/builtin.py   # discoverable generic tools: web_search, web_fetch, run_python
+├── envs/
+│   ├── trading/       # FULLY IMPLEMENTED: deterministic exchange + objective P&L score
+│   ├── security/      # SCAFFOLDED: planted-vuln files + F1 audit score
+│   └── research/      # SCAFFOLDED: real web tools + fact-coverage score
+└── eval/
+    ├── harness.py     # baseline vs evolved + process metrics
+    └── mock_demo.py   # toy env + scripted brain for the tokenless end-to-end demo
+main.py                # CLI: domains / eval / evolve / run
+tests/                 # 34 tests, no API key required
+Dockerfile, docker-compose.yml, Makefile
 ```
 
 ---
 
-### AgentState — single source of truth
-
-All session data lives in one Pydantic model that is serialised atomically to disk at every checkpoint:
-
-```
-AgentState
-├── phase                  # current Phase enum value
-├── session_id             # UUID, stable across resumes
-├── history                # full conversation (ConversationTurn list)
-├── artifact_analysis      # ArtifactAnalysis from archaeology
-├── specialist_profile     # SpecialistProfile (domain, competencies, …)
-├── playbook               # Playbook (steps, tools, guardrails)
-├── system_prompt          # crystallized system prompt text
-├── agent_code             # crystallized agent Python source
-├── evolution_count        # how many times EVOLUTION has run
-├── execution_scores       # per-turn float scores
-└── execution_feedback     # per-turn reason strings (parallel to scores)
-```
-
-Checkpoints are plain JSON files in `checkpoints/`. They are human-readable and can be inspected or manually edited if needed.
-
----
-
-### The layered system prompt
-
-CRYSTALLIZATION emits a system prompt structured in five named sections. Each section can be independently updated during EVOLUTION without rewriting the whole prompt:
-
-```
-## Identity
-Who the specialist is and what it does (derived from domain).
-
-## Core Competencies
-What it knows how to do well (from SpecialistProfile.core_competencies).
-
-## Heuristics
-How it reasons and approaches problems (from SpecialistProfile.heuristics).
-
-## Guardrails
-What it declines or escalates (derived from known failure modes + domain).
-
-## Known Failure Modes
-Specific patterns to actively watch for and mitigate.
-```
-
----
-
-### LLM adapter (LLMClient)
-
-`LLMClient` is a thin wrapper that normalises two SDK differences:
-
-| Difference | Anthropic | OpenAI |
-|---|---|---|
-| System prompt | Separate `system` param | First message with `role: system` |
-| Response text | `response.content[0].text` | `response.choices[0].message.content` |
-| Streaming | `client.messages.stream()` context manager | `client.chat.completions.create(stream=True)` iterator |
-| Caching | `cache_control: {type: ephemeral}` on system | Not applicable |
-
-The adapter exposes two methods used across all components:
-
-- `complete(system, user, max_tokens)` — single non-streaming call, returns text
-- `stream_tokens(messages, system, max_tokens)` — yields text tokens for live terminal output
-
-Switching providers requires only changing `STEM_PROVIDER` in `.env`. No code changes.
-
----
-
-### Checkpointing and safe writes
-
-Every mutating operation follows the same pattern:
-
-1. **Pre-checkpoint** — save state before the operation starts
-2. **Operate** — LLM calls, file writes
-3. **Post-checkpoint** (via `_advance()`) — save state with new phase
-
-File writes use **atomic rename**: content is written to `path.tmp`, then `rename()` replaces the target. On most filesystems rename is atomic, so a crash mid-write leaves the previous version intact.
-
-```
-write "playbook_v2.json.tmp"
-rename → "playbook_v2.json"    # atomic
-```
-
----
-
-### 3-pass archaeology design
-
-`TaskArchaeologist` makes three sequential LLM calls, each building on the previous:
-
-```
-Pass 1  artifacts + patterns + bottlenecks
-           ↓
-Pass 2  decision points  (why choices were made)
-           ↓
-Pass 3  failure modes    (what broke and what it implies)
-           ↓
-        ArtifactAnalysis (merged result)
-```
-
-Each pass uses a focused system prompt that instructs the LLM to return only a specific JSON schema. Markdown fences are stripped automatically if the model wraps the output.
-
----
-
-### Convergence detection
-
-`ConvergenceDetector` scores every EXECUTION turn on a 0–1 scale using the `SCORE_TURN` prompt, which evaluates:
-- Whether the response was on-domain
-- Whether specialist knowledge was applied
-- Whether any known failure modes were triggered
-
-Scores are stored in `AgentState.execution_scores`. Drift is computed as a rolling average of the last `DRIFT_WINDOW` (5) turns. When the average drops below `DRIFT_THRESHOLD` (0.6), EVOLUTION fires.
-
-The score defaults to **1.0** on any scoring failure so a broken LLM call never falsely triggers evolution.
-
----
-
-## Prerequisites
-
-- **Python 3.10 or newer** (the code uses `str | None` union syntax)
-- An API key for **OpenAI** or **Anthropic** (one is enough)
-
-On macOS the system Python is 3.9. Install a newer version first:
-
-```bash
-brew install python@3.12    # recommended
-# or
-pyenv install 3.12 && pyenv global 3.12
-```
-
----
-
-## Installation
-
-```bash
-git clone <repo-url>
-cd stem-agent
-
-# With OpenAI (default)
-make install                # creates .venv, installs openai + dev deps
-
-# With Anthropic instead
-make install PROVIDER=anthropic
-```
-
-Or manually:
-
-```bash
-python3.12 -m venv .venv
-source .venv/bin/activate
-
-pip install -e ".[openai,dev]"      # OpenAI
-# pip install -e ".[anthropic,dev]" # Anthropic
-```
-
----
-
-## Configuration
-
-Copy the example env file and fill in your key:
-
-```bash
-cp .env.example .env
-```
-
-Open `.env` and set the values for your provider:
-
-**OpenAI:**
-```
-STEM_PROVIDER=openai
-OPENAI_API_KEY=sk-...
-STEM_MODEL=gpt-4o
-```
-
-**Anthropic:**
-```
-STEM_PROVIDER=anthropic
-ANTHROPIC_API_KEY=sk-ant-...
-STEM_MODEL=claude-sonnet-4-6
-```
-
-All other settings are optional:
-
-| Variable | Default | Description |
-|---|---|---|
-| `STEM_CHECKPOINT_DIR` | `./checkpoints` | Where session state is saved |
-| `STEM_PLAYBOOK_DIR` | `./playbooks` | Where emitted specialist files go |
-
----
-
-## Running the agent
-
-```bash
-source .venv/bin/activate
-
-# Fresh session
-python main.py run
-
-# Resume a paused session (the checkpoint ID is printed on Ctrl-C)
-python main.py run --resume <checkpoint-id>
-
-# Override the model for this session only
-python main.py run --model gpt-4o-mini
-```
-
-Press **Ctrl-C** at any point to pause. The session is checkpointed and the ID is printed so you can resume later.
-
----
-
-## What to expect — phase by phase
-
-### INTERVIEW
-
-The agent asks one question at a time. Answer as specifically as you can — concrete details produce a better specialist.
-
-```
-╭─────────────────────────────────────╮
-│ Stem Agent — self-specializing AI   │
-╰─────────────────────────────────────╯
-
-What kind of work or problem class are you trying to solve?
-
-You: I write Python ETL scripts that process CSV files...
-```
-
-Good things to mention:
-- The domain (what kind of work it is)
-- Existing code, docs, or workflows (paste snippets if helpful)
-- What goes wrong — error messages, edge cases, failure modes
-- Constraints — performance, dependencies, time limits
-
-The agent runs a convergence check after every turn (minimum 3). You will see a dim status line:
-
-```
-convergence: 0.82 — gaps: none
-Interview complete — proceeding to archaeology
-```
-
-If the score stays low it keeps asking, up to a maximum of 10 turns.
-
-### ARCHAEOLOGY
-
-No input needed — this runs automatically. You will see progress:
-
-```
-╭────────────────────────────────────────╮
-│ Task Archaeology — 3-pass analysis     │
-╰────────────────────────────────────────╯
-Extracted 3 artifact(s), 2 failure example(s)
-Patterns: 4 | Bottlenecks: 2 | Decision points: 3
-Specialist: Python ETL pipeline debugger (convergence: 0.91)
-```
-
-If the convergence score is below 0.85 the agent loops back to INTERVIEW for more context.
-
-### CRYSTALLIZATION
-
-Also automatic. Three files are written to `playbooks/`:
-
-```
-╭──────────────────────────────────────────────╮
-│ Crystallization — emitting specialist        │
-╰──────────────────────────────────────────────╯
-Synthesizing system prompt...
-Playbook → ./playbooks/Python_ETL_pipeline_debugger_v1.json
-Agent    → ./playbooks/Python_ETL_pipeline_debugger_agent.py
-```
-
-### EXECUTION
-
-The specialist is now active. You talk to it exactly like a chat interface:
-
-```
-╭─────────────────────────────────────────────────╮
-│ Python ETL pipeline debugger — specialist active │
-╰─────────────────────────────────────────────────╯
-
-You: My script crashes when the CSV has duplicate column headers
-```
-
-After each response a silent score is computed. When the rolling average of the last 5 scores drops below 0.6, EVOLUTION fires automatically.
-
-### EVOLUTION
-
-Also automatic. The agent reads recent failures, updates the specialist profile and playbook, re-emits the system prompt and agent code, then returns to EXECUTION. You will see:
-
-```
-╭──────────────────────────────────────╮
-│ Evolution 1 — updating specialist    │
-╰──────────────────────────────────────╯
-Evolution 1 complete — returning to execution
-```
-
-A new versioned playbook (`_v2.json`) and updated agent file appear in `playbooks/`.
-
----
-
-## Pausing and resuming
-
-Press **Ctrl-C** at any point:
-
-```
-^C
-Session paused — checkpoint saved.
-Checkpoint saved → ./checkpoints/abc123_20260502T143201.json
-```
-
-The checkpoint ID is the filename without `.json`. Resume with:
-
-```bash
-python main.py run --resume abc123_20260502T143201
-```
-
-The agent picks up from exactly the phase it was in. All conversation history, scores, and emitted artifacts are restored.
-
-You can list all checkpoints:
-
-```bash
-ls checkpoints/
-```
-
-Each checkpoint is a plain JSON file — readable with any text editor if you want to inspect the state.
-
----
-
-## The emitted artifacts
-
-After CRYSTALLIZATION, `playbooks/` contains three files (using an example domain):
-
-```
-playbooks/
-├── Python_ETL_pipeline_debugger_v1.json   # structured playbook
-└── Python_ETL_pipeline_debugger_agent.py  # standalone runnable agent
-```
-
-**Playbook JSON** (`_v1.json`) — human-readable procedure:
-```json
-{
-  "domain": "Python ETL pipeline debugger",
-  "version": 1,
-  "steps": ["Load and validate schema", "Check for nulls and duplicates", ...],
-  "tools": ["pandas", "great_expectations", "sqlalchemy"],
-  "guardrails": ["Reject inputs > 10 GB without streaming", ...]
-}
-```
-
-**Agent code** (`_agent.py`) — self-contained Python script with the full system prompt baked in. No dependency on the stem package. Requires only `anthropic` or `openai` installed.
-
-After EVOLUTION, updated versions appear (`_v2.json`, updated `_agent.py`).
-
----
-
-## Running the crystallized specialist
-
-The emitted agent script is completely standalone:
-
-```bash
-source .venv/bin/activate
-python playbooks/Python_ETL_pipeline_debugger_agent.py
-```
-
-```
-Specialist active: Python ETL pipeline debugger
-Type 'quit' to exit.
-
-You: How do I handle encoding errors in pandas read_csv?
-Assistant: The safest approach is ...
-```
-
-Type `quit`, `exit`, or `q` to stop.
-
-The script reads `STEM_MODEL` and your provider key from the environment, so it respects whatever is in your `.env`.
-
----
-
-## Project layout
-
-```
-stem-agent/
-├── main.py                       # CLI entry point (typer)
-├── stem/
-│   ├── llm.py                    # Provider adapter (OpenAI / Anthropic)
-│   ├── models.py                 # Pydantic data models
-│   ├── prompts.py                # All system prompts in one place
-│   ├── stem_agent.py             # Phase state machine + agent loop
-│   ├── task_archaeologist.py     # 3-pass archaeology engine
-│   ├── crystallizer.py           # Emits system prompt, playbook, agent code
-│   └── convergence.py            # Per-turn scoring; drift detection
-├── tests/
-│   ├── test_llm.py               # LLM adapter tests
-│   ├── test_interview.py         # INTERVIEW phase tests
-│   ├── test_archaeology_phase.py # ARCHAEOLOGY phase tests
-│   ├── test_crystallization.py   # CRYSTALLIZATION phase tests
-│   ├── test_execution_evolution.py # EXECUTION + EVOLUTION tests
-│   └── test_models.py            # Data model smoke tests
-├── checkpoints/                  # Auto-saved session state (git-ignored)
-├── playbooks/                    # Emitted specialist files (git-ignored)
-├── pyproject.toml
-├── Makefile
-└── .env.example
-```
-
----
-
-## Running tests
-
-```bash
-make test
-# or
-.venv/bin/pytest -v
-```
-
-All 74 tests run without an API key — the LLM calls are mocked at the method level.
-
----
-
-## Switching LLM providers
-
-Change two lines in `.env` and restart:
-
-| Setting | OpenAI | Anthropic |
-|---|---|---|
-| `STEM_PROVIDER` | `openai` | `anthropic` |
-| API key variable | `OPENAI_API_KEY` | `ANTHROPIC_API_KEY` |
-| `STEM_MODEL` | `gpt-4o` | `claude-sonnet-4-6` |
-
-Then reinstall the SDK for the new provider if needed:
-
-```bash
-# switching to Anthropic
-pip install anthropic
-```
-
-No code changes required.
-
----
-
-## Troubleshooting
-
-**`command not found: python`**
-Use `python3.12` (or wherever your Python 3.10+ lives). Activate the venv first: `source .venv/bin/activate`.
-
-**`ModuleNotFoundError: No module named 'openai'` (or `anthropic`)**
-Run `pip install -e ".[openai]"` or `pip install -e ".[anthropic]"` from the project root with the venv active.
-
-**`AuthenticationError` / `401`**
-Your API key in `.env` is missing or wrong. Double-check `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`.
-
-**Agent loops back to INTERVIEW after archaeology**
-The convergence score was below 0.85. This means the profile is too vague. Give more specific answers — paste a code snippet, describe an exact error message, or name specific tools you use.
-
-**Checkpoint not found on resume**
-The checkpoint ID must match exactly (including the timestamp). Run `ls checkpoints/` to see available checkpoints.
-
-**`RateLimitError` mid-session**
-Press Ctrl-C to checkpoint, wait a moment, then resume with `--resume <id>`. The session continues from where it left off.
+## What I learned
+
+**The differentiation was hiding in the first prompt, and it was easy to miss.** The
+original design felt legitimately adaptive — it had convergence detection, drift scoring,
+re-crystallization. But all of that machinery operated *after* a human had already said
+"build me a Python ETL debugger." The agent never had to discover anything; it refined
+wording around a target it was handed. The lesson that stuck: if you want to know whether an
+agent is really undifferentiated, look at the very first thing it requires from you. If it's
+the domain, you've already lost.
+
+**"What can change" matters more than "how well it changes."** It's tempting to spend all
+your effort on a clever evolution algorithm. But a clever algorithm that can only edit a
+prompt will always top out at prompt-shaped improvements. Widening the surface — letting
+evolution adopt tools, toggle a verification step, add a sub-agent — does more for genuine
+specialization than a smarter optimizer over a narrow surface would. Most of the work in the
+rebuild went into making each surface a real, behavioral lever and keeping `apply_mutation`
+pure so it's trivially testable.
+
+**A benchmark has to be able to score zero.** The hardest part wasn't the agent, it was
+designing an environment where a competent base model genuinely *can't* succeed cold. LLMs
+are good enough that most "tasks" get a decent score with no evolution at all, which hides
+whether evolution did anything. The trading exchange was deliberately shaped so that the
+obvious passive strategy (buy-and-hold) makes nothing and doing nothing makes nothing — only
+discovering and exploiting the cycle pays. That ~0 floor is what makes the improvement
+legible.
+
+**What I'd do differently with more time.** (1) Score research with an LLM judge against a
+rubric instead of keyword coverage — the current proxy is too blunt and leaks base-model
+knowledge. (2) Bring security up to the trading domain's level: more files, partial-credit
+on line numbers, and a baseline I've measured rather than assumed. (3) Add a guard against
+evolution *regressing* a genome (keep the best-scoring ancestor), which matters once you run
+many generations on a noisy signal. (4) Run the real cross-domain eval and put the actual
+numbers in this README — right now the honest statement is "the pipeline and the trading
+economics are proven; the live multi-domain numbers are one `make eval` away."
