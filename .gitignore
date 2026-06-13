@@ -5,6 +5,7 @@ __pycache__/
 .pytest_cache/
 checkpoints/
 playbooks/
+results/
 *.egg-info/
 dist/
 .venv/

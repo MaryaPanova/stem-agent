@@ -1,24 +1,39 @@
-.PHONY: venv install test run clean
+.PHONY: install test eval eval-mock evolve docker-build docker-eval-mock docker-eval clean
 
-PYTHON ?= python3.12
-VENV   := .venv
-PY     := $(VENV)/bin/python
-PIP    := $(VENV)/bin/pip
+VENV ?= .venv
+PY := $(VENV)/bin/python
 
-PROVIDER ?= openai
+install:
+	python3 -m venv $(VENV)
+	$(PY) -m pip install -e ".[dev]"
 
-venv:
-	$(PYTHON) -m venv $(VENV)
-	$(PIP) install --upgrade pip
+test:
+	$(PY) -m pytest -q
 
-install: venv
-	$(PIP) install -e ".[$(PROVIDER),dev]"
+# Tokenless end-to-end smoke test (no API key needed).
+eval-mock:
+	$(PY) main.py eval --mock
 
-test: install
-	$(VENV)/bin/pytest
+# Real evaluation across all domains (spends tokens; needs ANTHROPIC_API_KEY).
+eval:
+	$(PY) main.py eval --domain all -g 3
 
-run: install
-	$(PY) main.py run
+evolve:
+	$(PY) main.py evolve --domain trading -g 3
+
+docker-build:
+	docker build -t stem-agent .
+
+# Prove the pipeline inside the container with no key.
+docker-eval-mock: docker-build
+	docker run --rm stem-agent
+
+# Real eval inside the container.
+docker-eval: docker-build
+	docker run --rm -e ANTHROPIC_API_KEY=$$ANTHROPIC_API_KEY \
+		-e STEM_MODEL=$${STEM_MODEL:-claude-sonnet-4-6} \
+		-v $$(pwd)/results:/app/results \
+		stem-agent python main.py eval --domain all -g 3
 
 clean:
-	rm -rf $(VENV) __pycache__ stem/__pycache__ tests/__pycache__ *.egg-info
+	rm -rf results checkpoints __pycache__ .pytest_cache *.egg-info
